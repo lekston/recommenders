@@ -57,11 +57,17 @@ def build_rating_matrix() -> sparse.coo_matrix:
 # TODO: train, dev, test split
 
 # Recommend:
-# 1. Find average ratings by each user & expres each rating as a deviation
+# 1. Find average ratings by each user & expres each rating as a deviation - DONE
 # 2. Calculate user-user weights:
 #   - for each user precompute an ordered dict storing correlations to the top-k other most
 #       similar/dissimilar users (in absolute terms)
 #   - store this as csv
+# 3. Implement predicted score computation
+# 4. Test on 'held-out' validation
+#       > select some random users and remove random ratings from them
+#       > re-calculate user-user weights between validation set and 'train' set
+#       > predict *known* gold truth values of ratings for validation users
+
 
 
 if __name__ == '__main__':
