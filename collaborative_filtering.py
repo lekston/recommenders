@@ -72,11 +72,31 @@ if __name__ == '__main__':
     number_of_entries_per_user[0] = 1 # dummy user
     per_user_bias = rating_matrix.sum(axis=1) / number_of_entries_per_user
     print("Done")
-    import pdb; pdb.set_trace()
 
     sys.stdout.write("Centering user ratings...")
     total_count = rating_matrix.getnnz()
-    data_indices_indptr = (rating_matrix.data - per_user_bias, rating_matrix.indices, range(0, total_count))
-    rating_matrix_centered = sparse.csr_matrix(data_indices_indptr)
+
+    def _prepare_new_csr_data(original_data: sparse.csr_matrix, per_user_bias: np.array) -> np.ndarray:
+        '''
+        This implements sparse subtraction of scalars
+        TODO: sparse addition & subtraction of scalars should be moved to a dedicated module
+        '''
+        per_row_count = original_data.getnnz(axis=1)
+        new_data = np.zeros((total_count,))
+        offset = 0
+        index_ptr = [0]
+        for row, nnz in zip(range(0, original_data.shape[0]), per_row_count):
+            index_ptr.append(offset)
+            new_data[offset:offset+nnz] = original_data.getrow(row).data - per_user_bias[row]
+            offset += nnz
+        return new_data, original_data.indices, index_ptr
+
+    start_time = time.time()
+    new_data, new_indices, index_ptr = _prepare_new_csr_data(rating_matrix, per_user_bias)
+
+    data_indices_indptr = (new_data, new_indices, index_ptr)
+    rating_matrix_centered = sparse.csr_matrix(data_indices_indptr, shape=rating_matrix.shape)
     print("Done")
+    print(f"Time spend on bias removal: {time.time() - start_time}")
+
     import pdb; pdb.set_trace()
