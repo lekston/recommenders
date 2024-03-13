@@ -119,7 +119,7 @@ class UserUserWeights(object):
         self._num_of_users = 0
         self._sorting_key = (lambda x: -math.fabs(x[0])) if absolute_sort else (lambda x: -x[0])
         self._min_overlap = 25
-        self._min_p_value = 0.35
+        self._max_p_value = 0.05
         self._top_k = top_k
         self._top_k_u2u_correlations: List[self.SingleUserTopKSortedEntries] = [
             SortedList(key=self._sorting_key) for _ in range(0, num_of_users)
@@ -157,7 +157,7 @@ class UserUserWeights(object):
                 common_item_indices = set(user_i.indices).intersection(set(user_j.indices))
                 if len(common_item_indices) > self._min_overlap:
                     corr_value: PearsonRResult = _calculate_corr(user_i, user_j, common_item_indices)
-                    if corr_value.pvalue < self._min_p_value:
+                    if corr_value.pvalue > self._max_p_value:
                         self.add_entry((user_i_idx, user_j_idx), corr_value.statistic)
                         num_updated += 1
                 num_of_explored_relations = int(0.5 * user_i_idx * (user_i_idx - 1) + user_j_idx)
@@ -252,7 +252,7 @@ if __name__ == '__main__':
         u2u_w = UserUserWeights(num_of_users=rmat_centered.shape[0], top_k=10)
         u2u_w.load_from_matrix(rmat_centered, shard_id, shards_count)
         return u2u_w
-    
+
     start_time = time.time()
     pool_size = 8
     with Pool(pool_size) as p:
@@ -260,7 +260,7 @@ if __name__ == '__main__':
             parallelized_user_user,
             [(rating_matrix_centered, i, pool_size) for i in range(0, pool_size)]
         )
-    
+
     [u2u_w.serialize(f"u2u_demo_{idx}.csv") for u2u_w, idx in enumerate(u2u_weights_to_merge)]
 
     print("Done")
