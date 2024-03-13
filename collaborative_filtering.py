@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import numpy as np
 import pandas as pd
+import random
 import sys
 import time
 
@@ -71,6 +72,34 @@ def build_rating_matrix() -> sparse.coo_matrix:
 #       > re-calculate user-user weights between validation set and 'train' set
 #       > predict *known* gold truth values of ratings for validation users
 
+'''
+Performance:
+    Total relations: 16.9*1e9 !!!
+    - min overlap 20, min p_value 0.5
+        Single core: 2.8*1e5 per 1min -> 16.8*1e6 per 1h -> 1000h single core
+        Optimistic look on parallelization: 250h!!!!
+    - min overlap 25, min p_value 0.35
+        Single core: 3.5*1e5 per 1min -> 21.0*1e6 per 1h -> 800h single core
+        Optimistic look on parallelization: 200h!!!!
+    - min overlap 25, min p_value 0.35 (no storage cost) -> same CPU runtime
+    - min overlap 25, min p_value 0.35 (dummy Pearson, skipping searchsorted)
+        Single core: 8.6*1e5 per 1min -> 51.6*1e6 per 1h -> pearsonr + searchsorted eat up 60% of CPU
+    - min overlap 25, min p_value 0.35 (dummy Pearson, using searchsorted on sets)
+        Single core: 6.6*1e5 per 1min -> 51.6*1e6 per 1h -> pearsonr alone uses ~25% of CPU
+    TODO: 
+    Option for speeding up: multiprocessing parallel for
+    - parallelize over blocks of traingular matrix
+    - gather all correlation values
+    - insert all results into the top_k_u2u shortlist (single threaded)
+    TODO:
+    - consider cosine instead of pearsonr as data is already centered (but I would still need the p-value)
+'''
+
+class DummyPearsonr(NamedTuple):
+    statistic: float
+    pvalue: float
+
+
 class CorrelationEntry(NamedTuple):
     correlation: float
     user_id: int
@@ -81,14 +110,14 @@ class UserUserWeights(object):
 
     def __init__(self, num_of_users: int, top_k: int = 20, absolute_sort: bool = True):
         '''
-        if abosulte_sort == True: store both the most similar and the most dissimilar users
+        if absolute_sort == True: store both the most similar and the most dissimilar users
         '''
         super().__init__()
         assert num_of_users > 0  and top_k > 0
         self._num_of_users = 0
         self._sorting_key = (lambda x: -math.fabs(x[0])) if absolute_sort else (lambda x: -x[0])
-        self._min_overlap = 20
-        self._min_p_value = 0.5
+        self._min_overlap = 25
+        self._min_p_value = 0.35
         self._top_k = top_k
         self._top_k_u2u_correlations: List[self.SingleUserTopKSortedEntries] = [
             SortedList(key=self._sorting_key) for _ in range(0, num_of_users)
@@ -98,22 +127,22 @@ class UserUserWeights(object):
         return self._top_k_u2u_correlations[index]
 
     def load_from_matrix(self, centered_rating_matrix: sparse.csr_matrix):
+        def dummy_pearsonr_algo(x, y):
+            return DummyPearsonr(statistic=random.uniform(-1.0, 1.0), pvalue=random.uniform(0.3,0.8))
+        pearsonr_algo = pearsonr
+        pearsonr_algo = dummy_pearsonr_algo
         def _calculate_corr(user_i:sparse.csr_matrix, user_j:sparse.csr_matrix , common_item_indices: Set):
             '''
             Extract shared ratings i.e. for items that both users have rated and compute user-user correlation
             '''
             user_i_rating_shortlist = []
             user_j_rating_shortlist = []
-            for item_idx in common_item_indices:
-                user_i_rating_shortlist.append(user_i.data[user_i.indices.searchsorted(item_idx)])
-                user_j_rating_shortlist.append(user_j.data[user_j.indices.searchsorted(item_idx)])
-            return pearsonr(user_i_rating_shortlist, user_j_rating_shortlist)
+            for index_value in common_item_indices:
+                user_i_rating_shortlist.append(user_i.data[user_i.indices.searchsorted(index_value)])
+                user_j_rating_shortlist.append(user_j.data[user_j.indices.searchsorted(index_value)])
+            return pearsonr_algo(user_i_rating_shortlist, user_j_rating_shortlist)
         start_time = time.time()
         num_updated = 0
-        # TODO: option for speeding up: multiprocessing parallel for
-        # - parallelize over blocks of traingular matrix
-        # - gather all correlation values
-        # - insert all results into the top_k_u2u shortlist (single threaded)
         for user_i_idx in range(1, centered_rating_matrix.shape[0]):
             user_i = centered_rating_matrix.getrow(user_i_idx)
             for user_j_idx in range(1, user_i_idx):
