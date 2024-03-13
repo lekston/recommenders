@@ -77,10 +77,12 @@ Performance:
     Total relations: 16.9*1e9 !!!
     - min overlap 20, min p_value 0.5
         Single core: 2.8*1e5 per 1min -> 16.8*1e6 per 1h -> 1000h single core
-        Optimistic look on parallelization: 250h!!!!
     - min overlap 25, min p_value 0.35
         Single core: 3.5*1e5 per 1min -> 21.0*1e6 per 1h -> 800h single core
-        Optimistic look on parallelization: 200h!!!!
+        Multi-core 4x (without merging): 8.3*1e5 -> 49.8*1e6
+        Multi-core 8x (4x physical) (without merging): 11.0*1e5 -> 66.0*1e6
+        Expected time using basic parallelization: 256h!!!! (11days)
+
     - min overlap 25, min p_value 0.35 (no storage cost) -> same CPU runtime
     - min overlap 25, min p_value 0.35 (dummy Pearson, skipping searchsorted)
         Single core: 8.6*1e5 per 1min -> 51.6*1e6 per 1h -> pearsonr + searchsorted eat up 60% of CPU
@@ -126,11 +128,14 @@ class UserUserWeights(object):
     def __getitem__(self, index) -> SingleUserTopKSortedEntries:
         return self._top_k_u2u_correlations[index]
 
-    def load_from_matrix(self, centered_rating_matrix: sparse.csr_matrix):
-        def dummy_pearsonr_algo(x, y):
-            return DummyPearsonr(statistic=random.uniform(-1.0, 1.0), pvalue=random.uniform(0.3,0.8))
+    def load_from_matrix(self, centered_rating_matrix: sparse.csr_matrix, shard_id=0, shards_count=1):
+        pid = os.getpid()
+        print(f'process id: {pid} processing shard {shard_id} out of {shards_count}')
+        assert 0 < shard_id + 1 <= shards_count <= 8
+        # def dummy_pearsonr_algo(x, y):
+        #     return DummyPearsonr(statistic=random.uniform(-1.0, 1.0), pvalue=random.uniform(0.3,0.8))
+        # pearsonr_algo = dummy_pearsonr_algo
         pearsonr_algo = pearsonr
-        pearsonr_algo = dummy_pearsonr_algo
         def _calculate_corr(user_i:sparse.csr_matrix, user_j:sparse.csr_matrix , common_item_indices: Set):
             '''
             Extract shared ratings i.e. for items that both users have rated and compute user-user correlation
@@ -145,7 +150,9 @@ class UserUserWeights(object):
         num_updated = 0
         for user_i_idx in range(1, centered_rating_matrix.shape[0]):
             user_i = centered_rating_matrix.getrow(user_i_idx)
-            for user_j_idx in range(1, user_i_idx):
+            lower_j_idx = 1 + int((shard_id)/shards_count * user_i_idx)
+            upper_j_idx = int((shard_id+1)/shards_count * user_i_idx)
+            for user_j_idx in range(lower_j_idx, upper_j_idx):
                 user_j = centered_rating_matrix.getrow(user_j_idx)
                 common_item_indices = set(user_i.indices).intersection(set(user_j.indices))
                 if len(common_item_indices) > self._min_overlap:
@@ -155,7 +162,7 @@ class UserUserWeights(object):
                         num_updated += 1
                 num_of_explored_relations = int(0.5 * user_i_idx * (user_i_idx - 1) + user_j_idx)
                 if num_of_explored_relations % 10000 == 0:
-                    print(f"Elapsed time: {time.time() - start_time:.4f}\t"
+                    print(f"[{shard_id+1}/{shards_count}] Elapsed time: {time.time() - start_time:.4f}\t"
                           f"Explored: {num_of_explored_relations}\tUpdated: {num_updated} (i,j): {user_i_idx, user_j_idx}")
 
     def add_entry(self, two_users: Tuple[int, int], corr_value: int):
@@ -174,7 +181,7 @@ class UserUserWeights(object):
         return self._top_k_u2u_correlations # TODO: convert to dataframe??
 
     def serialize(self, filename: str):
-        import pdb; pdb.set_trace()
+        # import pdb; pdb.set_trace()
         total_written = 0
         with open(filename, 'r') as ofile:
             for row in self._top_k_u2u_correlations:
@@ -183,8 +190,8 @@ class UserUserWeights(object):
                 total_written += 1
                 if total_written % 10000 == 0:
                     print(f"Printed {total_written} lines")
-        import pdb; pdb.set_trace()
-        pass
+        # import pdb; pdb.set_trace()
+        # pass
     
     @staticmethod
     def build_from_file(filename: str) -> UserUserWeights:
@@ -196,6 +203,10 @@ class UserUserWeights(object):
         u2u_weights._top_k = data.shape[1] # or max len of the longest row
         u2u_weights._top_k_u2u_correlations = data # TODO: is it worth converting back to list of sorted lists??
         return u2u_weights
+
+
+from multiprocessing import Pool
+import os
 
 
 if __name__ == '__main__':
@@ -235,10 +246,22 @@ if __name__ == '__main__':
     print(f"Time spend on bias removal: {time.time() - start_time}")
 
     sys.stdout.write("Computing user-user correlations...")
+
+    def parallelized_user_user(rmat_centered_with_shard_details):
+        rmat_centered, shard_id, shards_count = rmat_centered_with_shard_details
+        u2u_w = UserUserWeights(num_of_users=rmat_centered.shape[0], top_k=10)
+        u2u_w.load_from_matrix(rmat_centered, shard_id, shards_count)
+        return u2u_w
+    
     start_time = time.time()
-    u2u_w = UserUserWeights(num_of_users=rating_matrix_centered.shape[0], top_k=10)
-    u2u_w.load_from_matrix(rating_matrix_centered)
+    pool_size = 8
+    with Pool(pool_size) as p:
+        u2u_weights_to_merge = p.map(
+            parallelized_user_user,
+            [(rating_matrix_centered, i, pool_size) for i in range(0, pool_size)]
+        )
+    
+    [u2u_w.serialize(f"u2u_demo_{idx}.csv") for u2u_w, idx in enumerate(u2u_weights_to_merge)]
+
     print("Done")
     print(f"Time spend on user-user correlations: {time.time() - start_time}")
-
-    u2u_w.serialize("u2u_demo.csv")
