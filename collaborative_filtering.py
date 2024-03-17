@@ -123,6 +123,7 @@ class UserUserWeights(object):
         self._overlap_abs_min = 25
         self._overlap_ratio = 0.5
         self._max_p_value = 0.05
+        self._sampling_ratio = 0.04
         self._top_k = top_k
         self._top_k_u2u_correlations: List[self.SingleUserTopKSortedEntries] = [
             SortedList(key=self._sorting_key) for _ in range(0, num_of_users)
@@ -166,7 +167,7 @@ class UserUserWeights(object):
             upper_j_idx = int((shard_id+1)/shards_count * user_i_idx)
             # poor-man's Monte-Carlo selection
             size_of_subset = int(self._sampling_ratio*(upper_j_idx - lower_j_idx))
-            selection_subset = np.unique(np.random.uniform(lower_j_idx, upper_j_idx, size_of_subset))
+            selection_subset = np.unique(np.random.uniform(lower_j_idx, upper_j_idx, size_of_subset).astype(int))
             # NOTE: to use the entire domain go for: selection_subset = range(lower_j_idx, upper_j_idx)
             for user_j_idx in selection_subset:
                 user_j = centered_rating_matrix.getrow(user_j_idx)
@@ -174,11 +175,18 @@ class UserUserWeights(object):
                 required_overlap = min(len(user_i.indices), len(user_j.indices)) * self._overlap_ratio
                 required_overlap = max(required_overlap, self._overlap_abs_min)
                 if len(common_item_indices) > required_overlap:
+                    # process users with high overlap
                     # corr_value: PearsonRResult = _calculate_corr_ref(user_i, user_j, common_item_indices)
                     corr_value: PearsonRResult = _calculate_corr_array_like(user_i, user_j, common_item_indices)
                     if corr_value.pvalue > self._max_p_value:
                         self.add_entry((user_i_idx, user_j_idx), corr_value.statistic)
                         num_updated += 1
+                else:
+                    if len(common_item_indices) > self._overlap_abs_min:
+                        # TODO: store some users with medium overlap to get back to them if needed
+                        # TODO: potentially sort/cluster users by most movie overlap
+                        #       (eval overlap for each user combination)
+                        pass
                 num_of_explored_relations = int(0.5 * user_i_idx * (user_i_idx - 1) + user_j_idx)
                 if num_of_explored_relations % 10000 == 0:
                     print(f"[{shard_id+1}/{shards_count}] Elapsed time: {time.time() - start_time:.4f}\t"
@@ -202,10 +210,11 @@ class UserUserWeights(object):
     def serialize(self, filename: str):
         # import pdb; pdb.set_trace()
         total_written = 0
-        with open(filename, 'r') as ofile:
-            for row in self._top_k_u2u_correlations:
-                output = [entry for entry in row]
-                ofile.write(','.join(output) + '\n')
+        u2u_corr_list = [(idx, l) for idx, l in enumerate(self._top_k_u2u_correlations) if len(l) > 0]
+        with open(filename, 'w') as ofile:
+            for idx, row in u2u_corr_list:
+                output = [str(entry) for entry in row]
+                ofile.write(f'{ idx},\t' + ', '.join(output) + '\n')
                 total_written += 1
                 if total_written % 10000 == 0:
                     print(f"Printed {total_written} lines")
@@ -283,7 +292,7 @@ if __name__ == '__main__':
     else:
         u2u_weights_to_merge = [parallelized_user_user((rating_matrix_centered, 0, 32))]
 
-    [u2u_w.serialize(f"u2u_demo_{idx}.csv") for u2u_w, idx in enumerate(u2u_weights_to_merge)]
+    [u2u_w.serialize(f"u2u_demo_{idx}.csv") for idx, u2u_w in enumerate(u2u_weights_to_merge)]
 
     print("Done")
     print(f"Time spend on user-user correlations: {time.time() - start_time}")
