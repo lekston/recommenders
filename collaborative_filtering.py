@@ -66,7 +66,7 @@ def build_rating_matrix() -> sparse.coo_matrix:
 #   - for each user precompute an ordered dict storing correlations to the top-k other most
 #       similar/dissimilar users (in absolute terms)
 #   - store this as csv
-# 3. Implement predicted score computation
+# 3. Compute predicted score
 # 4. Test on 'held-out' validation
 #       > select some random users and remove random ratings from them
 #       > re-calculate user-user weights between validation set and 'train' set
@@ -82,6 +82,9 @@ Performance:
         Multi-core 4x (without merging): 8.3*1e5 -> 49.8*1e6
         Multi-core 8x (4x physical) (without merging): 11.0*1e5 -> 66.0*1e6
         Expected time using basic parallelization: 256h!!!! (11days)
+        Mutli-core 8x (without merging; searchsorted array like): -> 11.0*1e5 (no change)
+    - min overlap max(25, min(movies_u_i, movies_u_j)-10), min p_value 0.35
+        Mutli-core 8x (without merging; searchsorted array-like): -> 24.0*1e5 (no change)
 
     - min overlap 25, min p_value 0.35 (no storage cost) -> same CPU runtime
     - min overlap 25, min p_value 0.35 (dummy Pearson, skipping searchsorted)
@@ -131,32 +134,44 @@ class UserUserWeights(object):
     def load_from_matrix(self, centered_rating_matrix: sparse.csr_matrix, shard_id=0, shards_count=1):
         pid = os.getpid()
         print(f'process id: {pid} processing shard {shard_id} out of {shards_count}')
-        assert 0 < shard_id + 1 <= shards_count <= 8
+        assert 0 < shard_id + 1 <= shards_count
         # def dummy_pearsonr_algo(x, y):
         #     return DummyPearsonr(statistic=random.uniform(-1.0, 1.0), pvalue=random.uniform(0.3,0.8))
         # pearsonr_algo = dummy_pearsonr_algo
         pearsonr_algo = pearsonr
-        def _calculate_corr(user_i:sparse.csr_matrix, user_j:sparse.csr_matrix , common_item_indices: Set):
+        def _calculate_corr_ref(user_i:sparse.csr_matrix, user_j:sparse.csr_matrix , common_item_indices: Set):
             '''
             Extract shared ratings i.e. for items that both users have rated and compute user-user correlation
             '''
-            user_i_rating_shortlist = []
-            user_j_rating_shortlist = []
-            for index_value in common_item_indices:
-                user_i_rating_shortlist.append(user_i.data[user_i.indices.searchsorted(index_value)])
-                user_j_rating_shortlist.append(user_j.data[user_j.indices.searchsorted(index_value)])
+            user_i_rating_shortlist = np.empty(len(common_item_indices))
+            user_j_rating_shortlist = np.empty(len(common_item_indices))
+            for out_idx, index_value in enumerate(common_item_indices):
+                user_i_rating_shortlist[out_idx] = user_i.data[user_i.indices.searchsorted(index_value)]
+                user_j_rating_shortlist[out_idx] = user_j.data[user_j.indices.searchsorted(index_value)]
             return pearsonr_algo(user_i_rating_shortlist, user_j_rating_shortlist)
+        def _calculate_corr_array_like(user_i:sparse.csr_matrix, user_j:sparse.csr_matrix , common_item_indices: Set):
+            '''
+            Extract shared ratings i.e. for items that both users have rated and compute user-user correlation
+            '''
+            common_item_indices = sorted(common_item_indices)
+            user_i_csr_indices = user_i.indices.searchsorted(common_item_indices)
+            user_j_csr_indices = user_j.indices.searchsorted(common_item_indices)
+            return pearsonr_algo(user_i.data[user_i_csr_indices], user_j.data[user_j_csr_indices])
+
         start_time = time.time()
         num_updated = 0
         for user_i_idx in range(1, centered_rating_matrix.shape[0]):
             user_i = centered_rating_matrix.getrow(user_i_idx)
             lower_j_idx = 1 + int((shard_id)/shards_count * user_i_idx)
             upper_j_idx = int((shard_id+1)/shards_count * user_i_idx)
+            # TODO: consider Monte-Carlo selection
             for user_j_idx in range(lower_j_idx, upper_j_idx):
                 user_j = centered_rating_matrix.getrow(user_j_idx)
                 common_item_indices = set(user_i.indices).intersection(set(user_j.indices))
-                if len(common_item_indices) > self._min_overlap:
-                    corr_value: PearsonRResult = _calculate_corr(user_i, user_j, common_item_indices)
+                min_overlap = max(min(len(user_i.indices), len(user_j.indices)) - 10, self._min_overlap)
+                if len(common_item_indices) > min_overlap:
+                    # corr_value: PearsonRResult = _calculate_corr_ref(user_i, user_j, common_item_indices)
+                    corr_value: PearsonRResult = _calculate_corr_array_like(user_i, user_j, common_item_indices)
                     if corr_value.pvalue > self._max_p_value:
                         self.add_entry((user_i_idx, user_j_idx), corr_value.statistic)
                         num_updated += 1
@@ -254,12 +269,15 @@ if __name__ == '__main__':
         return u2u_w
 
     start_time = time.time()
-    pool_size = 8
-    with Pool(pool_size) as p:
-        u2u_weights_to_merge = p.map(
-            parallelized_user_user,
-            [(rating_matrix_centered, i, pool_size) for i in range(0, pool_size)]
-        )
+    pool_size = 1
+    if pool_size > 1:
+        with Pool(pool_size) as p:
+            u2u_weights_to_merge = p.map(
+                parallelized_user_user,
+                [(rating_matrix_centered, i, pool_size) for i in range(0, pool_size)]
+            )
+    else:
+        u2u_weights_to_merge = [parallelized_user_user((rating_matrix_centered, 0, 256))]
 
     [u2u_w.serialize(f"u2u_demo_{idx}.csv") for u2u_w, idx in enumerate(u2u_weights_to_merge)]
 
