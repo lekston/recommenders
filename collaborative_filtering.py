@@ -3,7 +3,6 @@ from __future__ import annotations
 import math
 import numpy as np
 import pandas as pd
-import random
 import sys
 import time
 
@@ -121,7 +120,8 @@ class UserUserWeights(object):
         assert num_of_users > 0  and top_k > 0
         self._num_of_users = 0
         self._sorting_key = (lambda x: -math.fabs(x[0])) if absolute_sort else (lambda x: -x[0])
-        self._min_overlap = 25
+        self._overlap_abs_min = 25
+        self._overlap_ratio = 0.5
         self._max_p_value = 0.05
         self._top_k = top_k
         self._top_k_u2u_correlations: List[self.SingleUserTopKSortedEntries] = [
@@ -164,12 +164,16 @@ class UserUserWeights(object):
             user_i = centered_rating_matrix.getrow(user_i_idx)
             lower_j_idx = 1 + int((shard_id)/shards_count * user_i_idx)
             upper_j_idx = int((shard_id+1)/shards_count * user_i_idx)
-            # TODO: consider Monte-Carlo selection
-            for user_j_idx in range(lower_j_idx, upper_j_idx):
+            # poor-man's Monte-Carlo selection
+            size_of_subset = int(self._sampling_ratio*(upper_j_idx - lower_j_idx))
+            selection_subset = np.unique(np.random.uniform(lower_j_idx, upper_j_idx, size_of_subset))
+            # NOTE: to use the entire domain go for: selection_subset = range(lower_j_idx, upper_j_idx)
+            for user_j_idx in selection_subset:
                 user_j = centered_rating_matrix.getrow(user_j_idx)
                 common_item_indices = set(user_i.indices).intersection(set(user_j.indices))
-                min_overlap = max(min(len(user_i.indices), len(user_j.indices)) - 10, self._min_overlap)
-                if len(common_item_indices) > min_overlap:
+                required_overlap = min(len(user_i.indices), len(user_j.indices)) * self._overlap_ratio
+                required_overlap = max(required_overlap, self._overlap_abs_min)
+                if len(common_item_indices) > required_overlap:
                     # corr_value: PearsonRResult = _calculate_corr_ref(user_i, user_j, common_item_indices)
                     corr_value: PearsonRResult = _calculate_corr_array_like(user_i, user_j, common_item_indices)
                     if corr_value.pvalue > self._max_p_value:
@@ -269,7 +273,7 @@ if __name__ == '__main__':
         return u2u_w
 
     start_time = time.time()
-    pool_size = 1
+    pool_size = 8
     if pool_size > 1:
         with Pool(pool_size) as p:
             u2u_weights_to_merge = p.map(
@@ -277,7 +281,7 @@ if __name__ == '__main__':
                 [(rating_matrix_centered, i, pool_size) for i in range(0, pool_size)]
             )
     else:
-        u2u_weights_to_merge = [parallelized_user_user((rating_matrix_centered, 0, 256))]
+        u2u_weights_to_merge = [parallelized_user_user((rating_matrix_centered, 0, 32))]
 
     [u2u_w.serialize(f"u2u_demo_{idx}.csv") for u2u_w, idx in enumerate(u2u_weights_to_merge)]
 
