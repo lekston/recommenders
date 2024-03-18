@@ -129,8 +129,11 @@ class UserUserWeights(object):
             SortedList(key=self._sorting_key) for _ in range(0, num_of_users)
         ]
 
-    def __getitem__(self, index) -> SingleUserTopKSortedEntries:
-        return self._top_k_u2u_correlations[index]
+    def __getitem__(self, index) -> List[SingleUserTopKSortedEntries]:
+        return list(self._top_k_u2u_correlations[index])
+
+    def get_correlations(self) -> List[CorrelationEntry]:
+        return [[u2u_entry for u2u_entry in user] for user in self._top_k_u2u_correlations]
 
     def load_from_matrix(self, centered_rating_matrix: sparse.csr_matrix, shard_id=0, shards_count=1):
         pid = os.getpid()
@@ -195,7 +198,7 @@ class UserUserWeights(object):
     def add_entry(self, two_users: Tuple[int, int], corr_value: int):
         user_i, user_j = two_users
         def _update_user(user, other_user, value):
-            user_top_k_entries: self.SingleUserTopKSortedEntries = self._top_k_u2u_correlations[user]
+            user_top_k_entries: SingleUserTopKSortedEntries = self._top_k_u2u_correlations[user]
             user_top_k_entries.add((value, other_user))
             if len(user_top_k_entries) > self._top_k:
                 user_top_k_entries.pop()
@@ -207,10 +210,11 @@ class UserUserWeights(object):
     def top_k_u2u_correlations(self):
         return self._top_k_u2u_correlations # TODO: convert to dataframe??
 
-    def serialize(self, filename: str):
+    @staticmethod
+    def serialize(top_k_u2u_correlations: List[SingleUserTopKSortedEntries], filename: str):
         # import pdb; pdb.set_trace()
         total_written = 0
-        u2u_corr_list = [(idx, l) for idx, l in enumerate(self._top_k_u2u_correlations) if len(l) > 0]
+        u2u_corr_list = [(idx, l) for idx, l in enumerate(top_k_u2u_correlations) if len(l) > 0]
         with open(filename, 'w') as ofile:
             for idx, row in u2u_corr_list:
                 output = [str(entry) for entry in row]
@@ -279,7 +283,7 @@ if __name__ == '__main__':
         rmat_centered, shard_id, shards_count = rmat_centered_with_shard_details
         u2u_w = UserUserWeights(num_of_users=rmat_centered.shape[0], top_k=10)
         u2u_w.load_from_matrix(rmat_centered, shard_id, shards_count)
-        return u2u_w
+        return u2u_w.get_correlations()
 
     start_time = time.time()
     pool_size = 8
@@ -292,7 +296,7 @@ if __name__ == '__main__':
     else:
         u2u_weights_to_merge = [parallelized_user_user((rating_matrix_centered, 0, 32))]
 
-    [u2u_w.serialize(f"u2u_demo_{idx}.csv") for idx, u2u_w in enumerate(u2u_weights_to_merge)]
+    [UserUserWeights.serialize(u2u_w, f"u2u_demo_{idx}.csv") for idx, u2u_w in enumerate(u2u_weights_to_merge)]
 
     print("Done")
     print(f"Time spend on user-user correlations: {time.time() - start_time}")
