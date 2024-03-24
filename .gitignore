@@ -1,1 +1,2 @@
 movielens-20m-dataset/*
+**/__pycache__/**

@@ -5,12 +5,12 @@ import math
 from scipy import sparse
 from typing import Dict, List, Set, Tuple, TypeAlias
 
-from .user_user_weights import (
-    UserUserWeights
+from .cf_weights import (
+    CollaborativeFilteringWeights
 )
 
-class BasicRecommender:
-    def __init__(self, ratings_matrix_unbiased: sparse.csr_matrix, u2u_weights: UserUserWeights):
+class BasicUser2UserRecommender:
+    def __init__(self, ratings_matrix_unbiased: sparse.csr_matrix, u2u_weights: CollaborativeFilteringWeights):
         self._rating_mat = ratings_matrix_unbiased
         self._u2u_weights = u2u_weights
 

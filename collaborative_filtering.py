@@ -3,15 +3,15 @@ from __future__ import annotations
 import sys
 import time
 
-from src.user_user_weights import (
-    UserUserWeights
+from src.cf_weights import (
+    CollaborativeFilteringWeights
 )
-from src.basic_recommender import BasicRecommender
+from src.basic_recommender import BasicUser2UserRecommender
 from src.utils import (
     build_rating_matrix,
+    calc_collaborative_filtering_weights,
+    CFilterType,
     unbias_the_ratings,
-    generate_user_user_matrix,
-    merge_user2user_parts
 )
 
 '''
@@ -21,9 +21,9 @@ work-around:
   movieId = 0 is a dummy movie
 '''
 
-def demo_recommend() -> None:
-    # u2u_merged = UserUserWeights.build_from_files(["./workdir/u2u_merged.csv"])
-    u2u_merged = UserUserWeights.build_from_files(["./u2u_merged.csv"])
+def demo_recommend_u2u() -> None:
+    # u2u_merged = CollaborativeFilteringWeights.build_from_files(["./workdir/u2u_merged.csv"])
+    u2u_merged = CollaborativeFilteringWeights.build_from_files(["./u2u_merged.csv"])
 
     sys.stdout.write("Centering user ratings...")
     start_time = time.time()
@@ -31,7 +31,7 @@ def demo_recommend() -> None:
     print("Done")
     print(f"Time spend on bias removal: {time.time() - start_time}")
 
-    rec = BasicRecommender(
+    rec = BasicUser2UserRecommender(
         ratings_matrix_unbiased=rating_matrix_centered,
         u2u_weights=u2u_merged
     )
@@ -42,23 +42,68 @@ def demo_recommend() -> None:
     rec.recommend(user_id=11111)
 
 
-def demo_preprocess() -> None:
-    generate_user_user_matrix(pool_size=8, merged_output_file='u2u_merged.csv')
+def demo_recommend_i2i() -> None:
+    u2u_merged = CollaborativeFilteringWeights.build_from_files(["./i2i_merged.csv"])
+
+    sys.stdout.write("Centering user ratings...")
+    start_time = time.time()
+    rating_matrix_centered = unbias_the_ratings(build_rating_matrix())
+    print("Done")
+    print(f"Time spend on bias removal: {time.time() - start_time}")
+
+    # TODO
+    pass
+
+
+def demo_preprocess_u2u() -> None:
+    calc_collaborative_filtering_weights(
+        pool_size=8,
+        merged_output_file='u2u_merged.csv',
+        run_type=CFilterType.user2user
+    )
+
+
+def demo_preprocess_i2i() -> None:
+    calc_collaborative_filtering_weights(
+        pool_size=8,
+        merged_output_file='i2i_merged.csv',
+        run_type=CFilterType.item2item
+    )
+
 
 
 if __name__ == '__main__':
-    if len(sys.argv) == 2 and sys.argv[1] == 'preprocess':
-        print("Note: the demo config of this run takes ~5 hours on 4 core i7.")
-        answer = input("Do you want to proceed? [y/n]")
-        if answer != 'y':
-            print("Aborting")
-            sys.exit(0)
-        demo_preprocess()
-    elif len(sys.argv) == 2 and sys.argv[1] == 'demo_recommend':
-        demo_recommend()
-    else:
+    def _print_usage():
         print("Usage:")
-        print(f"\t{sys.argv[0]} preprocess - runs User-User weight matrix generation")
-        print(f"\t{sys.argv[0]} demo_recommend - runs recommendation example")
+        print(f"\t{sys.argv[0]} u2u_preprocess - runs User-User weight matrix generation")
+        print(f"\t{sys.argv[0]} u2u_demo_recommend - runs User-User recommendation example")
+        print(f"\t{sys.argv[0]} i2i_preprocess - runs Item-Item weight matrix generation")
+        print(f"\t{sys.argv[0]} i2i_demo_recommend - runs Item-Item recommendation example")
+
+    if len(sys.argv) == 2:
+        if sys.argv[1] == 'u2u_preprocess':
+            print("Note: the demo config of this run takes ~5 hours on 4 core i7.")
+            answer = input("Do you want to proceed? [y/n]")
+            if answer != 'y':
+                print("Aborting")
+                sys.exit(0)
+            demo_preprocess_u2u()
+        elif sys.argv[1] == 'u2u_demo_recommend':
+            demo_recommend_u2u()
+        elif sys.argv[1] == 'i2i_preprocess':
+            print("Note: the demo config of this run takes long time to run.")
+            answer = input("Do you want to proceed? [y/n]")
+            if answer != 'y':
+                print("Aborting")
+                sys.exit(0)
+            demo_preprocess_i2i()
+        elif sys.argv[1] == 'i2i_demo_recommend':
+            demo_recommend_i2i()
+        else:
+            _print_usage()
+    else:
+        _print_usage()
+
+
 
 

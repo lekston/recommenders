@@ -16,7 +16,7 @@ from typing import List, NamedTuple, Set, Tuple, TypeAlias
 
 class CorrelationEntry(NamedTuple):
     correlation: float
-    user_id: int
+    neighbor_id: int
 
 
 class DummyPearsonr(NamedTuple):
@@ -30,8 +30,18 @@ class DummyPearsonr(NamedTuple):
 LOGGING_PERIOD = 20000
 
 
-class UserUserWeights(object):
-    SingleUserTopKSortedEntries : TypeAlias = SortedList[CorrelationEntry]
+class CollaborativeFilteringWeights(object):
+    TopKSortedNeighbors : TypeAlias = SortedList[CorrelationEntry]
+    '''
+    This class can be used to calculate correlations for both User-User and Item-Item CF.
+
+    However, some naming conventions have been adopted to simplify understanding of the
+    default User-User case.
+
+    Most method internals assume that we work with User-User correlations. This can be generalized by assuming
+    that `user` corresponds to `row` while `idem` to column.
+    For Item-Item correlations case the meaning of `user` and `item` has to be swapped (as does `u2u` & `i2i`).
+    '''
 
     def __init__(
             self,
@@ -50,9 +60,9 @@ class UserUserWeights(object):
         self._overlap_abs_min = 25
         self._overlap_ratio = 0.5
         self._max_p_value = 0.05
-        self._sampling_ratio = sampling_ratio
+        self._sampling_ratio = sampling_ratio if 0 < sampling_ratio < 1.0 else 1
         self._top_k = top_k
-        self._top_k_u2u_correlations: List[UserUserWeights.SingleUserTopKSortedEntries] = [
+        self._top_k_u2u_correlations: List[CollaborativeFilteringWeights.TopKSortedNeighbors] = [
             SortedList(key=self._sorting_key) for _ in range(0, num_of_users)
         ]
         self._pearsonr_algo = pearsonr
@@ -61,10 +71,10 @@ class UserUserWeights(object):
         # self._pearsonr_algo = dummy_pearsonr_algo
         
 
-    def __setitem__(self, key: int, value: UserUserWeights.SingleUserTopKSortedEntries):
+    def __setitem__(self, key: int, value: CollaborativeFilteringWeights.TopKSortedNeighbors):
         self._top_k_u2u_correlations[key] = value
 
-    def __getitem__(self, key: int) -> UserUserWeights.SingleUserTopKSortedEntries:
+    def __getitem__(self, key: int) -> CollaborativeFilteringWeights.TopKSortedNeighbors:
         return self._top_k_u2u_correlations[key]
 
     def __len__(self) -> int:
@@ -73,7 +83,7 @@ class UserUserWeights(object):
     def get_correlations_as_list(self) -> List[List[CorrelationEntry]]:
         return [list(user) for user in self._top_k_u2u_correlations]
 
-    def get_correlations(self) -> List[UserUserWeights.SingleUserTopKSortedEntries]:
+    def get_correlations(self) -> List[CollaborativeFilteringWeights.TopKSortedNeighbors]:
         return self._top_k_u2u_correlations
 
     def _calculate_corr_(
@@ -118,10 +128,12 @@ class UserUserWeights(object):
             user_i = centered_rating_matrix.getrow(user_i_idx)
             lower_j_idx = 1 + int((shard_id)/shards_count * user_i_idx)
             upper_j_idx = int((shard_id+1)/shards_count * user_i_idx)
-            # poor-man's Monte-Carlo selection
             size_of_subset = int(self._sampling_ratio*(upper_j_idx - lower_j_idx))
-            selection_subset = np.unique(np.random.uniform(lower_j_idx, upper_j_idx, size_of_subset).astype(int))
-            # NOTE: to use the entire domain go for: selection_subset = range(lower_j_idx, upper_j_idx)
+            if self._sampling_ratio < 1:
+                # poor-man's Monte-Carlo selection
+                selection_subset = np.unique(np.random.uniform(lower_j_idx, upper_j_idx, size_of_subset).astype(int))
+            else:
+                selection_subset = range(lower_j_idx, upper_j_idx)
             for user_j_idx in selection_subset:
                 user_j = centered_rating_matrix.getrow(user_j_idx)
                 common_item_indices = set(user_i.indices).intersection(set(user_j.indices))
@@ -147,8 +159,8 @@ class UserUserWeights(object):
 
     def add_paired_entry(self, two_users: Tuple[int, int], corr_value: int):
         user_i, user_j = two_users
-        def _update_user(user: int, other_user: int, value: int) -> UserUserWeights.SingleUserTopKSortedEntries:
-            user_top_k_entries: UserUserWeights.SingleUserTopKSortedEntries = self._top_k_u2u_correlations[user]
+        def _update_user(user: int, other_user: int, value: int) -> CollaborativeFilteringWeights.TopKSortedNeighbors:
+            user_top_k_entries: CollaborativeFilteringWeights.TopKSortedNeighbors = self._top_k_u2u_correlations[user]
             user_top_k_entries.add((value, other_user))
             if len(user_top_k_entries) > self._top_k:
                 user_top_k_entries.pop()
@@ -156,7 +168,7 @@ class UserUserWeights(object):
         _update_user(user_i, user_j, corr_value)
         _update_user(user_j, user_i, corr_value)
 
-    def recreate_entry(self, idx: int, user: SingleUserTopKSortedEntries):
+    def recreate_entry(self, idx: int, user: TopKSortedNeighbors):
         self._top_k_u2u_correlations[idx] = user
 
     @property
@@ -164,9 +176,9 @@ class UserUserWeights(object):
         return self._top_k_u2u_correlations # TODO: convert to dataframe??
 
     @classmethod
-    def serialize(cls, top_k_u2u_correlations: List[SingleUserTopKSortedEntries], filename: str):
+    def serialize(cls, list_of_top_k_correlations: List[TopKSortedNeighbors], filename: str):
         total_written = 0
-        u2u_corr_list = [(idx, l) for idx, l in enumerate(top_k_u2u_correlations) if len(l) > 0]
+        u2u_corr_list = [(idx, l) for idx, l in enumerate(list_of_top_k_correlations) if len(l) > 0]
         with open(filename, 'w') as ofile:
             for idx, row in u2u_corr_list:
                 output = [str(entry) for entry_tuple in row for entry in entry_tuple]
@@ -176,7 +188,7 @@ class UserUserWeights(object):
                     print(f"Printed {total_written} lines")
 
     @staticmethod
-    def build_from_files(filenames: List[str]) -> UserUserWeights:
+    def build_from_files(filenames: List[str]) -> CollaborativeFilteringWeights:
         forced_columns = list([chr(x) for x in range(ord('A'), ord('Z')+1)] +
                               [f'A{chr(x)}' for x in range(ord('A'), ord('Z')+1)])
         u2u_parts = []
@@ -188,7 +200,7 @@ class UserUserWeights(object):
                 escapechar=r"|", doublequote=False # data for legacy experiments
             )
             last_user_idx = int(data.iloc[-1, 0])
-            u2u_weights = UserUserWeights(
+            u2u_weights = CollaborativeFilteringWeights(
                 num_of_users=max(data.shape[0]+1, last_user_idx+1),
                 top_k=20
             )
@@ -211,14 +223,14 @@ class UserUserWeights(object):
             u2u_parts.append(u2u_weights)
 
         u2u_parts = sorted(u2u_parts, key=lambda x: len(x), reverse=True)
-        u2u_weights_merged: UserUserWeights = u2u_parts[0]
+        u2u_weights_merged: CollaborativeFilteringWeights = u2u_parts[0]
         for part_idx, part in enumerate(u2u_parts[1:]):
             u2u_weights_merged.merge(part)
             print(f"Merged parts: base + {part_idx + 1}")
         return u2u_weights_merged
 
-    def merge(self, other_u2u_weights: UserUserWeights):
-        for other_uid, single_user_row in enumerate(other_u2u_weights.get_correlations()):
+    def merge(self, other_cf_weights: CollaborativeFilteringWeights):
+        for other_uid, single_user_row in enumerate(other_cf_weights.get_correlations()):
             if len(self[other_uid]) == 0:
                 self[other_uid] = single_user_row
             else:

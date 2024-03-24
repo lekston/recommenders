@@ -3,14 +3,20 @@ import pandas as pd
 import sys
 import time
 
+from enum import Enum
 from multiprocessing import Pool
 
 from scipy import sparse
 from typing import List, Optional
 
-from src.user_user_weights import (
-    UserUserWeights
+from .cf_weights import (
+    CollaborativeFilteringWeights
 )
+
+
+class CFilterType(Enum):
+    user2user: str = 'user2user'
+    item2item: str = 'item2item'
 
 
 def read_data(filepath: str) -> pd.DataFrame:
@@ -80,58 +86,68 @@ def unbias_the_ratings(ratings_matrix: sparse.coo_matrix) -> sparse.csr_matrix:
     return _subtract_scalar_from_csr_data(rating_matrix, per_user_bias)
 
 
-def _parallelized_user_user(rmat_centered_with_shard_details) -> UserUserWeights:
+def _parallelized_cf_worker(rmat_centered_with_shard_details) -> List[CollaborativeFilteringWeights.TopKSortedNeighbors]:
     rmat_centered, shard_id, shards_count = rmat_centered_with_shard_details
     print(f"{rmat_centered_with_shard_details}")
-    u2u_w = UserUserWeights(num_of_users=rmat_centered.shape[0], top_k=10)
+    # TODO: support selectable sampling_ratio (0.04 should be default for u2u, 0.2 for i2i)
+    u2u_w = CollaborativeFilteringWeights(num_of_users=rmat_centered.shape[0], top_k=10, sampling_ratio=0.2)
     u2u_w.load_from_matrix(rmat_centered, shard_id, shards_count)
     return u2u_w.get_correlations_as_list()
 
 
-def generate_user_user_matrix(
+def calc_collaborative_filtering_weights(
         pool_size: int = 8,
-        merged_output_file: Optional[str] = None
+        merged_output_file: Optional[str] = None,
+        run_type: CFilterType = CFilterType.user2user
     ) -> None:
 
     sys.stdout.write("Centering user ratings...")
     start_time = time.time()
-    rating_matrix_centered = unbias_the_ratings(build_rating_matrix())
+    coo_ratings_matrix = build_rating_matrix()
+    if run_type == CFilterType.item2item:
+        coo_ratings_matrix = coo_ratings_matrix.transpose()
+    rating_matrix_centered = unbias_the_ratings(coo_ratings_matrix)
     print("Done")
     print(f"Time spend on bias removal: {time.time() - start_time}")
 
-    sys.stdout.write("Computing user-user correlations...")
+    if run_type == CFilterType.user2user:
+        sys.stdout.write("Computing user-user correlations...")
+        file_prefix = 'u2u'
+    else:
+        sys.stdout.write("Computing item-item correlations...")
+        file_prefix = 'i2i'
 
     start_time = time.time()
     if pool_size > 1:
         with Pool(pool_size) as p:
             u2u_weights_to_merge = p.map(
-                _parallelized_user_user,
+                _parallelized_cf_worker,
                 [(rating_matrix_centered, i, pool_size) for i in range(0, pool_size)]
             )
     else:
-        u2u_weights_to_merge = [_parallelized_user_user((rating_matrix_centered, 0, 32))]
+        u2u_weights_to_merge = [_parallelized_cf_worker((rating_matrix_centered, 0, 32))]
 
     [
-        UserUserWeights.serialize(u2u_w, f"u2u_weights_part_{idx}.csv")
+        CollaborativeFilteringWeights.serialize(u2u_w, f"{file_prefix}_weights_part_{idx}.csv")
         for idx, u2u_w in enumerate(u2u_weights_to_merge)
     ]
 
     print("Done")
-    print(f"Time spend on user-user correlations: {time.time() - start_time}")
+    print(f"Time spend on calculating correlations: {time.time() - start_time}")
 
     # TODO: configurable option to merge without storing
     if merged_output_file is not None:
         print("Merging")
-        u2u_merged = merge_user2user_parts([
-            f"u2u_weights_part_{idx}.csv" for idx in range(0, pool_size)
+        u2u_merged = merge_parts([
+            f"{file_prefix}_weights_part_{idx}.csv" for idx in range(0, pool_size)
         ], merged_output_file)
         print("Merging Done")
 
 
-def merge_user2user_parts(files: List[str], output: str = "u2u_merged.csv") -> UserUserWeights:
-    u2u_merged = UserUserWeights.build_from_files(files)
-    print(len(u2u_merged))
+def merge_parts(files: List[str], output_fname: str = "merged.csv") -> CollaborativeFilteringWeights:
+    u2u_merged = CollaborativeFilteringWeights.build_from_files(files)
     all_lengths = [(idx, len(entry)) for idx, entry in enumerate(u2u_merged.get_correlations_as_list())]
-    print(len(['' for idx, entry_len in all_lengths if entry_len > 0]))
-    UserUserWeights.serialize(u2u_merged.get_correlations(), "u2u_merged.csv")
+    print(f"Merged list contains: {len(u2u_merged)} entries")
+    print(f"Including: {len(['' for idx, entry_len in all_lengths if entry_len > 0])} non-zero entries")
+    CollaborativeFilteringWeights.serialize(u2u_merged.get_correlations(), output_fname)
     return u2u_merged
