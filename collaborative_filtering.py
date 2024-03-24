@@ -22,8 +22,8 @@ work-around:
 '''
 
 def demo_recommend() -> None:
-    u2u_merged = UserUserWeights.build_from_files(["./workdir/u2u_merged.csv"])
-    # u2u_merged = UserUserWeights.build_from_files(["./u2u_merged.csv"])
+    # u2u_merged = UserUserWeights.build_from_files(["./workdir/u2u_merged.csv"])
+    u2u_merged = UserUserWeights.build_from_files(["./u2u_merged.csv"])
 
     sys.stdout.write("Centering user ratings...")
     start_time = time.time()
@@ -43,11 +43,16 @@ def demo_recommend() -> None:
 
 
 def demo_preprocess() -> None:
-    generate_user_user_matrix(merged_output_file='u2u_merged.csv')
+    generate_user_user_matrix(pool_size=8, merged_output_file='u2u_merged.csv')
 
 
 if __name__ == '__main__':
     if len(sys.argv) == 2 and sys.argv[1] == 'preprocess':
+        print("Note: the demo config of this run takes ~5 hours on 4 core i7.")
+        answer = input("Do you want to proceed? [y/n]")
+        if answer != 'y':
+            print("Aborting")
+            sys.exit(0)
         demo_preprocess()
     elif len(sys.argv) == 2 and sys.argv[1] == 'demo_recommend':
         demo_recommend()

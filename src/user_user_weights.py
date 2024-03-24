@@ -71,7 +71,7 @@ class UserUserWeights(object):
         return len(self._top_k_u2u_correlations)
 
     def get_correlations_as_list(self) -> List[List[CorrelationEntry]]:
-        return [[u2u_entry for u2u_entry in user] for user in self._top_k_u2u_correlations]
+        return [list(user) for user in self._top_k_u2u_correlations]
 
     def get_correlations(self) -> List[UserUserWeights.SingleUserTopKSortedEntries]:
         return self._top_k_u2u_correlations

@@ -80,6 +80,14 @@ def unbias_the_ratings(ratings_matrix: sparse.coo_matrix) -> sparse.csr_matrix:
     return _subtract_scalar_from_csr_data(rating_matrix, per_user_bias)
 
 
+def _parallelized_user_user(rmat_centered_with_shard_details) -> UserUserWeights:
+    rmat_centered, shard_id, shards_count = rmat_centered_with_shard_details
+    print(f"{rmat_centered_with_shard_details}")
+    u2u_w = UserUserWeights(num_of_users=rmat_centered.shape[0], top_k=10)
+    u2u_w.load_from_matrix(rmat_centered, shard_id, shards_count)
+    return u2u_w.get_correlations_as_list()
+
+
 def generate_user_user_matrix(
         pool_size: int = 8,
         merged_output_file: Optional[str] = None
@@ -93,23 +101,20 @@ def generate_user_user_matrix(
 
     sys.stdout.write("Computing user-user correlations...")
 
-    def parallelized_user_user(rmat_centered_with_shard_details):
-        rmat_centered, shard_id, shards_count = rmat_centered_with_shard_details
-        u2u_w = UserUserWeights(num_of_users=rmat_centered.shape[0], top_k=10)
-        u2u_w.load_from_matrix(rmat_centered, shard_id, shards_count)
-        return u2u_w.get_correlations_as_list()
-
     start_time = time.time()
     if pool_size > 1:
         with Pool(pool_size) as p:
             u2u_weights_to_merge = p.map(
-                parallelized_user_user,
+                _parallelized_user_user,
                 [(rating_matrix_centered, i, pool_size) for i in range(0, pool_size)]
             )
     else:
-        u2u_weights_to_merge = [parallelized_user_user((rating_matrix_centered, 0, 32))]
+        u2u_weights_to_merge = [_parallelized_user_user((rating_matrix_centered, 0, 32))]
 
-    [UserUserWeights.serialize(u2u_w, f"u2u_weights_part_{idx}.csv") for idx, u2u_w in enumerate(u2u_weights_to_merge)]
+    [
+        UserUserWeights.serialize(u2u_w, f"u2u_weights_part_{idx}.csv")
+        for idx, u2u_w in enumerate(u2u_weights_to_merge)
+    ]
 
     print("Done")
     print(f"Time spend on user-user correlations: {time.time() - start_time}")
@@ -118,7 +123,7 @@ def generate_user_user_matrix(
     if merged_output_file is not None:
         print("Merging")
         u2u_merged = merge_user2user_parts([
-            f"u2u_weights_part_{idx}.csv" for idx in range(0, 8)
+            f"u2u_weights_part_{idx}.csv" for idx in range(0, pool_size)
         ], merged_output_file)
         print("Merging Done")
 
