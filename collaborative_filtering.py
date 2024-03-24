@@ -364,14 +364,13 @@ def generate_user_user_matrix(pool_size: int = 8) -> None:
     else:
         u2u_weights_to_merge = [parallelized_user_user((rating_matrix_centered, 0, 32))]
 
-    [UserUserWeights.serialize(u2u_w, f"u2u_demo_{idx}.csv") for idx, u2u_w in enumerate(u2u_weights_to_merge)]
+    [UserUserWeights.serialize(u2u_w, f"u2u_weights_part_{idx}.csv") for idx, u2u_w in enumerate(u2u_weights_to_merge)]
 
     # TODO: configurable option to merge without storing
     print("Done")
     print(f"Time spend on user-user correlations: {time.time() - start_time}")
 
 
-# head -n 10 u2u_demo_0.csv | sed -E "s/\(([^)]*),([^)]*)\)/'\1|,\2'/g" > u2u_test_inputs_1.csv
 def merge_user2user_parts(files: List[str], output: str = "u2u_merged.csv") -> UserUserWeights:
     u2u_merged = UserUserWeights.build_from_files(files)
     print(len(u2u_merged))
@@ -386,27 +385,32 @@ class Recommender:
         self._rating_mat = rating_matrix_centered
         self._u2u_weights = u2u_weights
 
-    def recommend(self, user_id: int) -> List[Tuple[int, float]]:
+    def recommend(self, user_id: int, min_reviews_per_movie: int = 5) -> List[Tuple[int, float]]:
         '''
         TODO: potential optimizations:
         - cache recommendation vector for each requested user
         '''
+        print(f"Processing user {user_id}")
         correlated_users = self._u2u_weights[user_id]
+        if len(correlated_users) < 3:
+            raise RuntimeError(f"Recommendation Error:"
+                               f" User {user_id} has too few {len(correlated_users)} correlated users")
 
-        MovieRatingNumDenum: TypeAlias = Tuple[float, float]
+        MovieRatingNumDenum: TypeAlias = Tuple[float, float, int]
         movie_scores_wip: Dict[int, MovieRatingNumDenum] = {}
         omega_NB_movie_ids: Set[int] = set() # movies watched by all neighbors
 
         def _update_movie_scores(movie_id: int, movie_rating: float, u2u_weight: float):
-            rating_num_denum = (u2u_weight * movie_rating, u2u_weight)
+            rating_num_denum_reviewers = (u2u_weight * movie_rating, math.fabs(u2u_weight), 1)
             if movie_id in movie_scores_wip.keys():
                 prev_score = movie_scores_wip[movie_id]
                 movie_scores_wip[movie_id] = (
-                    prev_score[0] + rating_num_denum[0],
-                    prev_score[1] + rating_num_denum[1]
+                    prev_score[0] + rating_num_denum_reviewers[0],
+                    prev_score[1] + rating_num_denum_reviewers[1],
+                    prev_score[2] + rating_num_denum_reviewers[2]
                 )
             else:
-                movie_scores_wip[movie_id] = rating_num_denum
+                movie_scores_wip[movie_id] = rating_num_denum_reviewers
 
         for corr_u2u_weight, neighbor_id in correlated_users:
             neighbor_id = int(neighbor_id)
@@ -418,11 +422,14 @@ class Recommender:
 
         print(f"Number of movies watched by neighbors {len(omega_NB_movie_ids)} ({len(movie_scores_wip.keys())})")
         movie_scores: List[Tuple[int, float]] = sorted(
-            [(movie_id, score_num/score_denum) for movie_id, (score_num, score_denum) in movie_scores_wip.items()],
+            [
+                (movie_id, score_num/score_denum)
+                for movie_id, (score_num, score_denum, reviewers) in movie_scores_wip.items()
+                if reviewers >= min_reviews_per_movie
+            ],
             key=lambda movie_id_score: movie_id_score[1],
             reverse=True
         )
-        import pdb; pdb.set_trace()
         print(f"Total recommendations: {len(movie_scores)}."
               f" Best (incl. already watched) {movie_scores[:10]}")
         already_watched_indices = self._rating_mat[user_id].indices
@@ -430,20 +437,24 @@ class Recommender:
             (movie_id, score) for movie_id, score in movie_scores if movie_id not in already_watched_indices
         ])
         print(f"Unwatched recommendations: {len(unwatched_movie_scores)}."
-              f" Best (incl. already watched) {unwatched_movie_scores[:10]}")
-
+              f" Best (unwatched): {unwatched_movie_scores[:10]}")
+        print(f" Worst (unwatched): {unwatched_movie_scores[-10:]}")
         print("Removing already watched")
-        already_watched_with_scores = zip(self._rating_mat[user_id].indices, self._rating_mat[user_id].data)
+        already_watched_with_scores = [
+            (mv_id, score) for mv_id, score
+            in zip(self._rating_mat[user_id].indices, self._rating_mat[user_id].data)
+        ]
 
         print("Comparing scores of already watched vs. preditions")
         predicted_watched_movie_scores = list([
             (movie_id, score) for movie_id, score in movie_scores if movie_id in already_watched_indices
         ])
+        overlapped_indices = [movie_id for movie_id, score in predicted_watched_movie_scores]
         overlapped_ground_truth: List[Tuple[int, float]] = sorted(
             [
                 (movie_id, score)
                 for movie_id, score in already_watched_with_scores
-                if movie_id in predicted_watched_movie_scores
+                if movie_id in overlapped_indices
             ],
             key=lambda movie_id_score: movie_id_score[1],
             reverse=True
@@ -452,21 +463,19 @@ class Recommender:
         for prediction, gt in zip(predicted_watched_movie_scores, overlapped_ground_truth):
             print(f"prediction: {prediction}, gt: {gt}")
 
-        import pdb; pdb.set_trace()
-        # TODO
-        # expected output:
-        # - all movies from the neighborhood with scores from weighted neighbors that watched them
-
+        print(f"Recommendations for user {user_id}:")
+        [print(item) for item in unwatched_movie_scores[:20]]
         return unwatched_movie_scores
 
 
 if __name__ == '__main__':
-
-    # u2u_merged = merge_user2user_parts([
-    #     f"u2u_test_inputs_{idx}.csv" for idx in range(0, 8)
-    # ])
-    # import pdb; pdb.set_trace()
-    u2u_merged = UserUserWeights.build_from_files(["u2u_merged.csv"])
+    merge_results_from_workers = False
+    if merge_results_from_workers:
+        u2u_merged = merge_user2user_parts([
+            f"u2u_weights_part_{idx}.csv" for idx in range(0, 8)
+        ])
+    else:
+        u2u_merged = UserUserWeights.build_from_files(["u2u_merged.csv"])
 
     sys.stdout.write("Centering user ratings...")
     start_time = time.time()
@@ -479,5 +488,7 @@ if __name__ == '__main__':
         u2u_weights=u2u_merged
     )
 
-    rec.recommend(user_id=99623)
-    import pdb; pdb.set_trace()
+    #rec.recommend(user_id=99623)
+    #rec.recommend(user_id=5024)
+    rec.recommend(user_id=70000)
+    rec.recommend(user_id=11111)
