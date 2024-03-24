@@ -43,7 +43,7 @@ def demo_recommend_u2u() -> None:
 
 
 def demo_recommend_i2i() -> None:
-    u2u_merged = CollaborativeFilteringWeights.build_from_files(["./i2i_merged.csv"])
+    i2i_merged = CollaborativeFilteringWeights.build_from_files(["./i2i_merged.csv"])
 
     sys.stdout.write("Centering user ratings...")
     start_time = time.time()
@@ -51,7 +51,18 @@ def demo_recommend_i2i() -> None:
     print("Done")
     print(f"Time spend on bias removal: {time.time() - start_time}")
 
-    # TODO
+    # TODO Implement BasicItem2ItemRecommender
+    '''
+    Compute predicted score:
+        - get all items j \subset Psi_u(i) rated by user i
+        - select all items NB_i(j) which are correlated with items j \subset Psi_u(i)
+        - calculate scores for all items (NB_i(j) \setminus Psi_u(i)) not seen by user i
+            - each item from NB_i(j) may be similar / dissimilar to several movies rated by the user i
+            - score for items from NB_i(j) is calculated by weighted sum over all similar/dissimilar items j' \subset Psi_u(i)
+            - weights come from the item-item weights
+            - deviations come from the ratings of the current user only
+        - recommend the best match
+    '''
     pass
 
 
