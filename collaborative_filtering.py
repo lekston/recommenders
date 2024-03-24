@@ -13,7 +13,7 @@ from sortedcollections import SortedList
 from scipy import sparse
 from scipy.stats import pearsonr
 from scipy.stats._result_classes import PearsonRResult
-from typing import List, NamedTuple, Set, Tuple, TypeAlias
+from typing import Dict, List, NamedTuple, Set, Tuple, TypeAlias
 
 
 # NOTE: all sparse matrices / arrays use indexing that starts with 1 (userId & movieId)
@@ -386,23 +386,78 @@ class Recommender:
         self._rating_mat = rating_matrix_centered
         self._u2u_weights = u2u_weights
 
-    def recommend(self, user_id: int) -> List[int]:
+    def recommend(self, user_id: int) -> List[Tuple[int, float]]:
+        '''
+        TODO: potential optimizations:
+        - cache recommendation vector for each requested user
+        '''
         correlated_users = self._u2u_weights[user_id]
+
+        MovieRatingNumDenum: TypeAlias = Tuple[float, float]
+        movie_scores_wip: Dict[int, MovieRatingNumDenum] = {}
         omega_NB_movie_ids: Set[int] = set() # movies watched by all neighbors
-        omega_NB_movies: List[int] = []
-        rows_tmp = []
-        for corr, neighbor_id in correlated_users:
+
+        def _update_movie_scores(movie_id: int, movie_rating: float, u2u_weight: float):
+            rating_num_denum = (u2u_weight * movie_rating, u2u_weight)
+            if movie_id in movie_scores_wip.keys():
+                prev_score = movie_scores_wip[movie_id]
+                movie_scores_wip[movie_id] = (
+                    prev_score[0] + rating_num_denum[0],
+                    prev_score[1] + rating_num_denum[1]
+                )
+            else:
+                movie_scores_wip[movie_id] = rating_num_denum
+
+        for corr_u2u_weight, neighbor_id in correlated_users:
             neighbor_id = int(neighbor_id)
             neighbor_movies = self._rating_mat.getrow(neighbor_id)
-            rows_tmp.append(neighbor_movies)
-            omega_NB_movies.append(neighbor_movies.indices.tolist())
             omega_NB_movie_ids = omega_NB_movie_ids.union(neighbor_movies.indices.tolist())
 
-        print(f"Number of movies watched by neighbors {len(omega_NB_movie_ids)}")
+            for movie_id, movie_rating in zip(neighbor_movies.indices, neighbor_movies.data):
+                _update_movie_scores(movie_id, movie_rating, corr_u2u_weight)
+
+        print(f"Number of movies watched by neighbors {len(omega_NB_movie_ids)} ({len(movie_scores_wip.keys())})")
+        movie_scores: List[Tuple[int, float]] = sorted(
+            [(movie_id, score_num/score_denum) for movie_id, (score_num, score_denum) in movie_scores_wip.items()],
+            key=lambda movie_id_score: movie_id_score[1],
+            reverse=True
+        )
+        import pdb; pdb.set_trace()
+        print(f"Total recommendations: {len(movie_scores)}."
+              f" Best (incl. already watched) {movie_scores[:10]}")
+        already_watched_indices = self._rating_mat[user_id].indices
+        unwatched_movie_scores = list([
+            (movie_id, score) for movie_id, score in movie_scores if movie_id not in already_watched_indices
+        ])
+        print(f"Unwatched recommendations: {len(unwatched_movie_scores)}."
+              f" Best (incl. already watched) {unwatched_movie_scores[:10]}")
+
+        print("Removing already watched")
+        already_watched_with_scores = zip(self._rating_mat[user_id].indices, self._rating_mat[user_id].data)
+
+        print("Comparing scores of already watched vs. preditions")
+        predicted_watched_movie_scores = list([
+            (movie_id, score) for movie_id, score in movie_scores if movie_id in already_watched_indices
+        ])
+        overlapped_ground_truth: List[Tuple[int, float]] = sorted(
+            [
+                (movie_id, score)
+                for movie_id, score in already_watched_with_scores
+                if movie_id in predicted_watched_movie_scores
+            ],
+            key=lambda movie_id_score: movie_id_score[1],
+            reverse=True
+        )
+
+        for prediction, gt in zip(predicted_watched_movie_scores, overlapped_ground_truth):
+            print(f"prediction: {prediction}, gt: {gt}")
+
         import pdb; pdb.set_trace()
         # TODO
+        # expected output:
+        # - all movies from the neighborhood with scores from weighted neighbors that watched them
 
-        return []
+        return unwatched_movie_scores
 
 
 if __name__ == '__main__':
