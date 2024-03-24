@@ -1,0 +1,6 @@
+dataclasses==0.6
+mypy==1.9.0
+mypy-extensions==1.0.0
+numba==0.59.0
+numpy==1.26.4
+pandas==2.2.0
