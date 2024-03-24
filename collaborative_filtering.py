@@ -40,13 +40,13 @@ def read_data(filepath: str) -> pd.DataFrame:
     return dataset
 
 
-def build_rating_matrix() -> sparse.coo_matrix:
+def build_rating_matrix(dataset: str = './movielens-20m-dataset/rating.csv') -> sparse.coo_matrix:
     '''
         rating_matrix format:
         - row index is userId
         - column index is movieId
     '''
-    data = read_data('./movielens-20m-dataset/rating.csv')
+    data = read_data(dataset)
 
     user_count = data['userId'].max()
     movie_count = data['movieId'].max()
@@ -59,6 +59,39 @@ def build_rating_matrix() -> sparse.coo_matrix:
     return rating_matrix
 
 
+def ratings_matrix_unbiased(ratings_matrix: sparse.coo_matrix) -> sparse.csr_matrix:
+    rating_matrix: sparse.csr_matrix = ratings_matrix.tocsr() # Compressed sparse row for efficient compute
+    rating_matrix.sort_indices() # in-place
+
+    sys.stdout.write("Calculating user biases...")
+    number_of_entries_per_user = np.expand_dims(rating_matrix.getnnz(axis=1), axis=1)
+    number_of_entries_per_user[0] = 1 # dummy user
+    per_user_bias = rating_matrix.sum(axis=1) / number_of_entries_per_user
+    print("Done")
+
+    total_count = rating_matrix.getnnz()
+    def _subtract_scalar_from_csr_data(original_data: sparse.csr_matrix, per_user_bias: np.array) -> sparse.csr_matrix:
+        '''
+        This implements sparse subtraction of scalars
+        TODO: sparse addition & subtraction of scalars should be moved to a dedicated module
+        '''
+        per_row_non_zero_count = original_data.getnnz(axis=1)
+        new_data = np.zeros((total_count,))
+        offset = 0
+        index_ptr = [0]
+        for row, nnz in zip(range(0, original_data.shape[0]), per_row_non_zero_count):
+            index_ptr.append(offset)
+            new_data[offset:offset+nnz] = original_data.getrow(row).data - per_user_bias[row]
+            offset += nnz
+
+        data_indices_indptr = (new_data, original_data.indices, index_ptr)
+        rating_matrix_centered = sparse.csr_matrix(data_indices_indptr, shape=rating_matrix.shape)
+        return rating_matrix_centered
+
+    return _subtract_scalar_from_csr_data(rating_matrix, per_user_bias)
+
+
+
 # TODO: train, dev, test split
 
 # Recommend:
@@ -69,7 +102,11 @@ def build_rating_matrix() -> sparse.coo_matrix:
 #   - store this as csv
 #   DONE!
 # 3. Compute predicted score
-# 4. Test on 'held-out' validation
+#   - get all users NB_u(i) correlated with user i
+#   - extract all movies Omega_NB_u(i) rated by users NB_u(i)
+#   - calculate scores for all movies (Omega_NB_u(i) \ Omega_u(i)) not seen by user i
+#   - recommend the best match
+# 4. Optional: test on 'held-out' validation
 #       > select some random users and remove random ratings from them
 #       > re-calculate user-user weights between validation set and 'train' set
 #       > predict *known* gold truth values of ratings for validation users
@@ -248,7 +285,8 @@ class UserUserWeights(object):
 
     @staticmethod
     def build_from_files(filenames: List[str]) -> UserUserWeights:
-        forced_columns = [chr(ord('A')+i) for i in range(0,26)]
+        forced_columns = list([chr(x) for x in range(ord('A'), ord('Z')+1)] +
+                              [f'A{chr(x)}' for x in range(ord('A'), ord('Z')+1)])
         u2u_parts = []
         for fname in filenames:
             data = pd.read_csv(
@@ -281,7 +319,7 @@ class UserUserWeights(object):
             u2u_parts.append(u2u_weights)
 
         u2u_parts = sorted(u2u_parts, key=lambda x: len(x), reverse=True)
-        u2u_weights_merged = u2u_parts[0]
+        u2u_weights_merged: UserUserWeights = u2u_parts[0]
         for part_idx, part in enumerate(u2u_parts[1:]):
             u2u_weights_merged.merge(part)
             print(f"Merged parts: base + {part_idx + 1}")
@@ -301,39 +339,11 @@ class UserUserWeights(object):
 
 
 def generate_user_user_matrix(pool_size: int = 8) -> None:
-    rating_matrix: sparse.csr_matrix = build_rating_matrix().tocsr() # Compressed sparse row for efficient compute
-    rating_matrix.sort_indices() # in-place
-
-    sys.stdout.write("Calculating user biases...")
-    number_of_entries_per_user = np.expand_dims(rating_matrix.getnnz(axis=1), axis=1)
-    number_of_entries_per_user[0] = 1 # dummy user
-    per_user_bias = rating_matrix.sum(axis=1) / number_of_entries_per_user
-    print("Done")
-
-    total_count = rating_matrix.getnnz()
-    def _subtract_scalar_from_csr_data(original_data: sparse.csr_matrix, per_user_bias: np.array) -> np.ndarray:
-        '''
-        This implements sparse subtraction of scalars
-        TODO: sparse addition & subtraction of scalars should be moved to a dedicated module
-        '''
-        per_row_count = original_data.getnnz(axis=1)
-        new_data = np.zeros((total_count,))
-        offset = 0
-        index_ptr = [0]
-        for row, nnz in zip(range(0, original_data.shape[0]), per_row_count):
-            index_ptr.append(offset)
-            new_data[offset:offset+nnz] = original_data.getrow(row).data - per_user_bias[row]
-            offset += nnz
-
-        data_indices_indptr = (new_data, original_data.indices, index_ptr)
-        rating_matrix_centered = sparse.csr_matrix(data_indices_indptr, shape=rating_matrix.shape)
-        return rating_matrix_centered
 
     sys.stdout.write("Centering user ratings...")
     start_time = time.time()
-    rating_matrix_centered = _subtract_scalar_from_csr_data(rating_matrix, per_user_bias)
+    rating_matrix_centered = ratings_matrix_unbiased(build_rating_matrix())
     print("Done")
-
     print(f"Time spend on bias removal: {time.time() - start_time}")
 
     sys.stdout.write("Computing user-user correlations...")
@@ -356,18 +366,63 @@ def generate_user_user_matrix(pool_size: int = 8) -> None:
 
     [UserUserWeights.serialize(u2u_w, f"u2u_demo_{idx}.csv") for idx, u2u_w in enumerate(u2u_weights_to_merge)]
 
+    # TODO: configurable option to merge without storing
     print("Done")
     print(f"Time spend on user-user correlations: {time.time() - start_time}")
 
 
 # head -n 10 u2u_demo_0.csv | sed -E "s/\(([^)]*),([^)]*)\)/'\1|,\2'/g" > u2u_test_inputs_1.csv
+def merge_user2user_parts(files: List[str], output: str = "u2u_merged.csv") -> UserUserWeights:
+    u2u_merged = UserUserWeights.build_from_files(files)
+    print(len(u2u_merged))
+    all_lengths = [(idx, len(entry)) for idx, entry in enumerate(u2u_merged.get_correlations_as_list())]
+    print(len(['' for idx, entry_len in all_lengths if entry_len > 0]))
+    UserUserWeights.serialize(u2u_merged.get_correlations(), "u2u_merged.csv")
+    return u2u_merged
+
+
+class Recommender:
+    def __init__(self, ratings_matrix_unbiased: sparse.csr_matrix, u2u_weights: UserUserWeights):
+        self._rating_mat = rating_matrix_centered
+        self._u2u_weights = u2u_weights
+
+    def recommend(self, user_id: int) -> List[int]:
+        correlated_users = self._u2u_weights[user_id]
+        omega_NB_movie_ids: Set[int] = set() # movies watched by all neighbors
+        omega_NB_movies: List[int] = []
+        rows_tmp = []
+        for corr, neighbor_id in correlated_users:
+            neighbor_id = int(neighbor_id)
+            neighbor_movies = self._rating_mat.getrow(neighbor_id)
+            rows_tmp.append(neighbor_movies)
+            omega_NB_movies.append(neighbor_movies.indices.tolist())
+            omega_NB_movie_ids = omega_NB_movie_ids.union(neighbor_movies.indices.tolist())
+
+        print(f"Number of movies watched by neighbors {len(omega_NB_movie_ids)}")
+        import pdb; pdb.set_trace()
+        # TODO
+
+        return []
+
 
 if __name__ == '__main__':
-    # UserUserWeights.build_from_files([f"u2u_demo_{idx}.csv" for idx in range(0, 1)])
-    u2u_merged = UserUserWeights.build_from_files([
-        f"u2u_test_inputs_{idx}.csv" for idx in range(0, 8)
-    ])
-    print(len(u2u_merged))
-    all_lengths = [(idx, len(entry)) for idx, entry in enumerate(u2u_merged.get_correlations())]
-    print(len(['' for idx, entry_len in all_lengths if entry_len > 0]))
+
+    # u2u_merged = merge_user2user_parts([
+    #     f"u2u_test_inputs_{idx}.csv" for idx in range(0, 8)
+    # ])
+    # import pdb; pdb.set_trace()
+    u2u_merged = UserUserWeights.build_from_files(["u2u_merged.csv"])
+
+    sys.stdout.write("Centering user ratings...")
+    start_time = time.time()
+    rating_matrix_centered = ratings_matrix_unbiased(build_rating_matrix())
+    print("Done")
+    print(f"Time spend on bias removal: {time.time() - start_time}")
+
+    rec = Recommender(
+        ratings_matrix_unbiased=rating_matrix_centered,
+        u2u_weights=u2u_merged
+    )
+
+    rec.recommend(user_id=99623)
     import pdb; pdb.set_trace()
